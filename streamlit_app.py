@@ -7,7 +7,7 @@ st.title("🎯 Tính thưởng BIO / BPO – nhiều mốc linh hoạt")
 st.markdown(
     """
 - **Logic**: Tra **mốc % theo Doanh thu *Tổng (BIO+BPO)*** → áp mốc cho từng bên;  
-  **Hệ số theo % chi phí** tính **riêng từng bên** (ví dụ ≥30% → chỉ nhận 80% phần *doanh số*).  
+  **Hệ số theo % chi phí** tính **riêng từng bên** (ví dụ ≥30% → chỉ nhận 80% phần *doanh số* theo config).  
   **Thưởng tối ưu chi phí** chỉ tính nếu **% chi phí của chính bên đó < ngưỡng** (mặc định 30%).
 - Bạn có thể **chỉnh các mốc** ở thanh bên (sidebar).
 """
@@ -25,8 +25,9 @@ default_rates = pd.DataFrame(
         "Pct_Rate":   [0.00, 0.005,      0.01,        0.015,       0.02,        0.025,          0.03],
     }
 )
+# Bản Streamlit của bạn chưa hỗ trợ num_rows → bỏ tham số này
 rates_df = st.sidebar.data_editor(
-    default_rates, num_rows="dynamic", use_container_width=True,
+    default_rates, use_container_width=True,
     help="Thêm/sửa dòng. Min_DT_VND phải tăng dần."
 )
 
@@ -38,7 +39,7 @@ default_costf = pd.DataFrame(
     }
 )
 costf_df = st.sidebar.data_editor(
-    default_costf, num_rows="dynamic", use_container_width=True,
+    default_costf, use_container_width=True,
     help="Ví dụ ≥30% → 0.8; ≥32% → 0.5; ≥35% → 0.0"
 )
 
@@ -53,32 +54,39 @@ use_rm = st.sidebar.toggle("Nhập bằng RM và tự nhân tỉ giá", value=Fa
 rate_vnd = st.sidebar.number_input("Tỉ giá VND/RM (nếu bật trên)", min_value=1, value=5200, step=100)
 
 # Helper lookup functions
-def lookup_rate(total_rev_vnd, table_rates: pd.DataFrame) -> float:
-    # ensure sorted
+def lookup_rate(total_rev_vnd: float, table_rates: pd.DataFrame) -> float:
     df = table_rates.dropna().sort_values("Min_DT_VND")
     pct = 0.0
     for _, row in df.iterrows():
-        if total_rev_vnd >= float(row["Min_DT_VND"]):
-            pct = float(row["Pct_Rate"])
-        else:
-            break
+        try:
+            min_dt = float(row["Min_DT_VND"])
+            if total_rev_vnd >= min_dt:
+                pct = float(row["Pct_Rate"])
+            else:
+                break
+        except Exception:
+            continue
     return pct
 
-def lookup_factor(cost_ratio, table_f: pd.DataFrame) -> float:
+def lookup_factor(cost_ratio: float, table_f: pd.DataFrame) -> float:
     df = table_f.dropna().sort_values("Min_CostRatio")
     fac = 0.0
     for _, row in df.iterrows():
-        if cost_ratio >= float(row["Min_CostRatio"]):
-            fac = float(row["Factor"])
-        else:
-            break
+        try:
+            min_r = float(row["Min_CostRatio"])
+            if cost_ratio >= min_r:
+                fac = float(row["Factor"])
+            else:
+                break
+        except Exception:
+            continue
     return fac
 
 # -------------------------
 # INPUT TABLE
 # -------------------------
 st.header("🧾 Nhập dữ liệu")
-st.caption("Điền tối đa 20 người. Cột RM sẽ được nhân tỉ giá nếu bạn bật chuyển đổi RM → VND ở sidebar.")
+st.caption("Điền tối đa 20 người. Nếu bật nhập RM, hệ thống sẽ nhân tỉ giá sang VND khi tính.")
 
 cols = st.columns([2, 1.2, 1.2, 1.2, 1.2])
 with cols[0]:
@@ -107,8 +115,8 @@ df_input = pd.DataFrame(rows, columns=["Tên", "DT_BIO", "CP_BIO", "DT_BPO", "CP
 
 st.divider()
 if st.button("📌 TÍNH THƯỞNG"):
-    # Convert to VND if needed
     df = df_input.copy()
+    # Convert to VND if user entered RM
     if use_rm:
         df[["DT_BIO","CP_BIO","DT_BPO","CP_BPO"]] = df[["DT_BIO","CP_BIO","DT_BPO","CP_BPO"]] * rate_vnd
 
@@ -125,21 +133,23 @@ if st.button("📌 TÍNH THƯỞNG"):
 
         total_rev = bio_rev_vnd + bpo_rev_vnd
         total_cost = bio_cost_vnd + bpo_cost_vnd
-        total_rate = lookup_rate(total_rev, rates_df)  # % mốc theo doanh thu tổng
 
-        # Tỷ lệ chi phí riêng từng bên
+        # % mốc theo doanh thu tổng
+        total_rate = lookup_rate(total_rev, rates_df)
+
+        # % chi phí riêng từng bên
         bio_ratio = (bio_cost_vnd / bio_rev_vnd) if bio_rev_vnd else 0.0
         bpo_ratio = (bpo_cost_vnd / bpo_rev_vnd) if bpo_rev_vnd else 0.0
 
-        # Hệ số doanh số theo % chi phí bên
+        # Hệ số doanh số theo % chi phí của từng bên
         bio_factor = lookup_factor(bio_ratio, costf_df)
         bpo_factor = lookup_factor(bpo_ratio, costf_df)
 
-        # Thưởng doanh số (áp dụng mốc tổng cho từng bên, nhân factor bên)
+        # Thưởng doanh số (mốc tổng × factor bên)
         bonus_sales_bio = bio_rev_vnd * total_rate * bio_factor
         bonus_sales_bpo = bpo_rev_vnd * total_rate * bpo_factor
 
-        # Thưởng tối ưu chi phí: chỉ khi % chi phí bên < elig_threshold
+        # Thưởng tối ưu chi phí (chỉ khi % chi phí bên < ngưỡng)
         bonus_opt_bio = (0.25 * (elig_threshold - bio_ratio) * bio_rev_vnd) if (bio_rev_vnd and bio_ratio < elig_threshold) else 0.0
         bonus_opt_bpo = (0.25 * (elig_threshold - bpo_ratio) * bpo_rev_vnd) if (bpo_rev_vnd and bpo_ratio < elig_threshold) else 0.0
 
@@ -174,4 +184,4 @@ if st.button("📌 TÍNH THƯỞNG"):
 else:
     st.info("Nhập số liệu và bấm **TÍNH THƯỞNG**")
 
-st.caption("© App tính thưởng BIO/BPO – tuỳ biến mốc, hệ số, ngưỡng tối ưu. Bởi ChatGPT.")
+st.caption("© App tính thưởng BIO/BPO – tuỳ biến mốc, hệ số, ngưỡng tối ưu.")
